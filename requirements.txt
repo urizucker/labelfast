@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+jinja2
+pydantic
+qrcode
+pillow
+reportlab
+pandas
+psycopg2-binary
+Initial backend requirements
