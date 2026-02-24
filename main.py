@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-
 import base64
-import fitz  # PyMuPDF
+import fitz
+import pandas as pd
+import io
+import qrcode
 
 app = FastAPI(title="Labelfast API")
 
@@ -15,200 +17,185 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store uploaded template as base64 image (simple v1 storage)
 TEMPLATE_DATA_URL = None
-
+METRC_CODES = []
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
     <html>
-        <head>
-            <title>Labelfast</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background: #f4f6f8;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                }
-                .card {
-                    background: white;
-                    padding: 40px;
-                    border-radius: 12px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-                    text-align: center;
-                }
-                a { display:block; margin-top:10px; color:#111; text-decoration:none; }
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h1>🚀 Labelfast</h1>
-                <p>Cloud-based variable label printing platform.</p>
-                <a href="/designer">Open Designer</a>
-                <a href="/print">Open Print Preview</a>
-            </div>
-        </body>
+    <body style="font-family:Arial;background:#f4f6f8;text-align:center;padding:100px;">
+        <h1>🚀 Labelfast</h1>
+        <a href="/designer">Open Designer</a>
+    </body>
     </html>
     """
 
-
-@app.get("/print", response_class=HTMLResponse)
-def print_label(w: float = 2.5, h: float = 3.0, text: str = "Sample Label"):
-    html = """
-    <html>
-      <head>
-        <style>
-          @page {{
-            size: {w}in {h}in;
-            margin: 0;
-          }}
-          body {{ margin:0; font-family:Arial; }}
-          .label {{
-            width: {w}in;
-            height: {h}in;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            font-size:16pt;
-          }}
-        </style>
-      </head>
-      <body>
-        <div class="label">{text}</div>
-        <script>window.print();</script>
-      </body>
-    </html>
-    """.format(w=w, h=h, text=text)
-
-    return html
-
-
 @app.get("/designer", response_class=HTMLResponse)
-def designer(w: float = 2.5, h: float = 3.0):
+def designer(w: float = 2.5, h: float = 3.0, qr_size: float = 1.0):
     global TEMPLATE_DATA_URL
-    bg = TEMPLATE_DATA_URL or ""
 
     return """
     <html>
-      <head>
-        <title>Labelfast Designer</title>
-        <style>
-          body {{ font-family: Arial; margin:0; background:#f4f6f8; }}
-          .topbar {{
-            background:white;
-            padding:12px;
-            border-bottom:1px solid #ddd;
-            display:flex;
-            gap:10px;
-            align-items:center;
-          }}
-          .btn {{
-            padding:8px 12px;
-            border-radius:8px;
-            border:1px solid #ddd;
-            background:#111;
-            color:white;
-            cursor:pointer;
-          }}
-          .label {{
+    <head>
+    <style>
+        body {{ font-family:Arial;background:#f4f6f8;margin:0; }}
+        .topbar {{ background:white;padding:10px;display:flex;gap:10px;flex-wrap:wrap; }}
+        .label {{
             width:{w}in;
             height:{h}in;
-            background:white;
             position:relative;
+            background:white;
             margin:20px;
-            box-shadow:0 10px 30px rgba(0,0,0,0.12);
-          }}
-          .bg {{
+            box-shadow:0 10px 30px rgba(0,0,0,0.15);
+        }}
+        .bg {{
+            position:absolute;inset:0;background-size:cover;background-position:center;
+        }}
+        .qr {{
             position:absolute;
-            inset:0;
-            background-size:cover;
-            background-position:center;
-          }}
-          .qr {{
-            position:absolute;
-            width:1in;
-            height:1in;
-            border:2px dashed #111;
+            width:{qr_size}in;
+            height:{qr_size}in;
             cursor:move;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            background:rgba(255,255,255,0.6);
-          }}
-        </style>
-      </head>
-      <body>
-        <div class="topbar">
-          <form action="/upload-template" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".png,.jpg,.jpeg,.pdf" required>
-            <button class="btn">Upload</button>
-          </form>
-          <button class="btn" onclick="window.print()">Print</button>
-          <a href="/" class="btn">Home</a>
-        </div>
+        }}
+        .idtext {{
+            position:absolute;
+            font-size:8pt;
+            text-align:center;
+            width:{qr_size}in;
+        }}
+        @media print {{
+            body {{ margin:0;background:white; }}
+            .topbar {{ display:none; }}
+        }}
+    </style>
+    </head>
+    <body>
 
-        <div class="label" id="label">
-          <div class="bg" id="bg"></div>
-          <div class="qr" id="qr" style="left:0.2in; top:0.2in;">QR</div>
-        </div>
+    <div class="topbar">
+        <form action="/upload-template" method="post" enctype="multipart/form-data">
+            Template:
+            <input type="file" name="file" accept=".png,.jpg,.jpeg,.pdf">
+            <button>Upload</button>
+        </form>
 
-        <script>
-          const bgData = {bg_json};
+        <form action="/upload-metrc" method="post" enctype="multipart/form-data">
+            METRC File:
+            <input type="file" name="file" accept=".csv,.xlsx">
+            <button>Upload</button>
+        </form>
 
-          if(bgData) {{
-              document.getElementById('bg').style.backgroundImage = "url(" + bgData + ")";
-          }}
+        <form method="get">
+            W:<input type="number" step="0.1" name="w" value="{w}">
+            H:<input type="number" step="0.1" name="h" value="{h}">
+            QR Size:<input type="number" step="0.1" name="qr_size" value="{qr_size}">
+            <button>Update</button>
+        </form>
 
-          const qr = document.getElementById("qr");
-          let dragging = false;
-          let offsetX = 0;
-          let offsetY = 0;
+        <button onclick="window.location='/print-all?w={w}&h={h}&qr_size={qr_size}'">
+            Print All
+        </button>
+    </div>
 
-          qr.addEventListener("mousedown", e => {{
-              dragging = true;
-              offsetX = e.offsetX;
-              offsetY = e.offsetY;
-          }});
+    <div class="label" id="label">
+        <div class="bg" id="bg"></div>
+        <div class="qr" id="qr" style="left:0.2in;top:0.2in;border:2px dashed black;"></div>
+    </div>
 
-          document.addEventListener("mousemove", e => {{
-              if(!dragging) return;
-              const rect = document.getElementById("label").getBoundingClientRect();
-              const pxPerIn = rect.width / {w};
-              const leftIn = (e.clientX - rect.left - offsetX) / pxPerIn;
-              const topIn = (e.clientY - rect.top - offsetY) / pxPerIn;
-              qr.style.left = leftIn + "in";
-              qr.style.top = topIn + "in";
-          }});
+    <script>
+        const bgData = {bg};
+        if(bgData) {{
+            document.getElementById("bg").style.backgroundImage="url("+bgData+")";
+        }}
 
-          document.addEventListener("mouseup", () => dragging=false);
-        </script>
-      </body>
+        const qr = document.getElementById("qr");
+        let dragging=false,offsetX=0,offsetY=0;
+
+        qr.onmousedown = e => {{
+            dragging=true;
+            offsetX=e.offsetX;
+            offsetY=e.offsetY;
+        }};
+
+        document.onmousemove = e => {{
+            if(!dragging) return;
+            const rect=document.getElementById("label").getBoundingClientRect();
+            const pxPerIn=rect.width/{w};
+            const left=(e.clientX-rect.left-offsetX)/pxPerIn;
+            const top=(e.clientY-rect.top-offsetY)/pxPerIn;
+            qr.style.left=left+"in";
+            qr.style.top=top+"in";
+        }};
+
+        document.onmouseup=()=>dragging=false;
+    </script>
+
+    </body>
     </html>
-    """.format(w=w, h=h, bg_json=repr(bg))
-
+    """.format(w=w,h=h,qr_size=qr_size,bg=repr(TEMPLATE_DATA_URL))
 
 @app.post("/upload-template")
 async def upload_template(file: UploadFile = File(...)):
     global TEMPLATE_DATA_URL
-
     content = await file.read()
-    filename = file.filename.lower()
-
-    if filename.endswith(".pdf"):
+    if file.filename.lower().endswith(".pdf"):
         pdf = fitz.open(stream=content, filetype="pdf")
         page = pdf.load_page(0)
         pix = page.get_pixmap(dpi=300)
         img_bytes = pix.tobytes("png")
-        b64 = base64.b64encode(img_bytes).decode("utf-8")
-        TEMPLATE_DATA_URL = f"data:image/png;base64,{b64}"
+        TEMPLATE_DATA_URL = "data:image/png;base64," + base64.b64encode(img_bytes).decode()
+    else:
+        TEMPLATE_DATA_URL = "data:image/png;base64," + base64.b64encode(content).decode()
+    return RedirectResponse("/designer",303)
 
-    elif filename.endswith((".png", ".jpg", ".jpeg")):
-        b64 = base64.b64encode(content).decode("utf-8")
-        mime = file.content_type or "image/png"
-        TEMPLATE_DATA_URL = f"data:{mime};base64,{b64}"
+@app.post("/upload-metrc")
+async def upload_metrc(file: UploadFile = File(...)):
+    global METRC_CODES
+    content = await file.read()
+    if file.filename.lower().endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    else:
+        df = pd.read_excel(io.BytesIO(content))
+    METRC_CODES = df["Unit Code"].dropna().tolist()
+    return RedirectResponse("/designer",303)
 
-    return RedirectResponse(url="/designer", status_code=303)
+@app.get("/print-all", response_class=HTMLResponse)
+def print_all(w: float = 2.5, h: float = 3.0, qr_size: float = 1.0):
+    global METRC_CODES, TEMPLATE_DATA_URL
+
+    labels_html=""
+
+    for code in METRC_CODES:
+        qr_img = qrcode.make(code)
+        buffer=io.BytesIO()
+        qr_img.save(buffer, format="PNG")
+        qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+
+        labels_html+=f"""
+        <div class="label">
+            <div class="bg" style="background-image:url('{TEMPLATE_DATA_URL}')"></div>
+            <img src="data:image/png;base64,{qr_base64}" 
+                 style="position:absolute;width:{qr_size}in;height:{qr_size}in;left:0.2in;top:0.2in;">
+            <div style="position:absolute;top:{0.2+qr_size}in;left:0.2in;width:{qr_size}in;font-size:8pt;text-align:center;">
+                {code}
+            </div>
+        </div>
+        """
+
+    return f"""
+    <html>
+    <head>
+    <style>
+        @page {{ size:{w}in {h}in;margin:0; }}
+        body {{ margin:0; }}
+        .label {{
+            width:{w}in;height:{h}in;position:relative;
+        }}
+        .bg {{ position:absolute;inset:0;background-size:cover; }}
+    </style>
+    </head>
+    <body onload="window.print()">
+    {labels_html}
+    </body>
+    </html>
+    """
