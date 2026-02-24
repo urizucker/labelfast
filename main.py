@@ -1,6 +1,9 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+import base64
+import fitz  # PyMuPDF
 
 app = FastAPI(title="Labelfast API")
 
