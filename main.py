@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Labelfast API")
 
-# Allow frontend connections later
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,12 +34,8 @@ def home():
                     box-shadow: 0 10px 30px rgba(0,0,0,0.1);
                     text-align: center;
                 }
-                h1 {
-                    margin-bottom: 10px;
-                }
-                p {
-                    color: #666;
-                }
+                h1 { margin-bottom: 10px; }
+                p { color: #666; }
             </style>
         </head>
         <body>
@@ -48,14 +43,15 @@ def home():
                 <h1>🚀 Labelfast</h1>
                 <p>Cloud-based variable label printing platform.</p>
                 <p>Status: Backend is live.</p>
+                <p><a href="/print">Open Print Preview</a></p>
             </div>
         </body>
     </html>
     """
-    @app.get("/print", response_class=HTMLResponse)
+
+@app.get("/print", response_class=HTMLResponse)
 def print_label(w: float = 2.5, h: float = 3.0, text: str = "Sample Label"):
-    # w and h are inches
-    return f"""
+    html = """
     <html>
       <head>
         <title>Labelfast Print</title>
@@ -108,8 +104,6 @@ def print_label(w: float = 2.5, h: float = 3.0, text: str = "Sample Label"):
             padding: 14px;
             font-size: 14px;
           }}
-
-          /* Print: only print the label, no toolbar, no background */
           @media print {{
             body {{
               background: white;
@@ -141,12 +135,11 @@ def print_label(w: float = 2.5, h: float = 3.0, text: str = "Sample Label"):
             <div class="label-content">
               <h3 style="margin:0 0 6px 0;">{text}</h3>
               <div style="color:#666;">This is a print-accurate preview.</div>
-              <div style="margin-top:10px; font-size:12px; color:#999;">/print?w={w}&h={h}&text=Your+Text</div>
+              <div style="margin-top:10px; font-size:12px; color:#999;">Try: /print?w=2.5&h=3&text=Grams+Mimosa</div>
             </div>
           </div>
         </div>
 
-        <!-- Print-only area -->
         <div class="print-area" style="display:none;">
           <div class="label">
             <div class="label-content">
@@ -157,4 +150,6 @@ def print_label(w: float = 2.5, h: float = 3.0, text: str = "Sample Label"):
 
       </body>
     </html>
-    """
+    """.format(w=w, h=h, text=text)
+
+    return html
