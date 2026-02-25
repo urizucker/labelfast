@@ -1,18 +1,18 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 
 import base64
+import io
+import zipfile
+
 import fitz  # PyMuPDF
 import pandas as pd
-import io
 import qrcode
-import zipfile
+from PIL import Image
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
-from PIL import Image
 
 
 app = FastAPI(title="Labelfast API")
@@ -25,69 +25,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Simple V1 in-memory storage (we'll replace with DB later) ---
-TEMPLATE_DATA_URL = None       # background image as data URL (png)
-METRC_CODES = []               # list of strings from "Unit Code" column
+# -------------------------
+# In-memory state (v1)
+# -------------------------
+TEMPLATE_DATA_URL = None  # background image stored as data:image/...;base64,...
+METRC_CODES = []          # list of strings from CSV/XLSX "Unit Code"
 
-# saved layout in INCHES (what you see = what prints)
+# Saved layout in inches (WYSIWYG goal)
 LAYOUT = {
     "w": 2.5,
     "h": 3.0,
     "qr_size": 0.5,
-    "x": 0.2,   # left in inches
-    "y": 0.2,   # top in inches
+    "x": 0.2,   # left in inches (from left edge)
+    "y": 0.2,   # top in inches  (from top edge)
 }
+
+# -------------------------
+# Helpers
+# -------------------------
 def display_text_from_unit_code(unit_code: str) -> str:
-    if not unit_code:
-        return ""
-    s = str(unit_code).strip()
-
-    # remove query string/fragments if any
-    s = s.split("?", 1)[0].split("#", 1)[0]
-
-    # normalize slashes
-    s = s.replace("\\", "/").strip()
-
-    # remove trailing slash
-    while s.endswith("/"):
-        s = s[:-1]
-
-    # take last path segment
-    last = s.split("/")[-1].strip()
-
-    # if the whole thing had no slashes (already a code), keep it
-    return last or s
     """
-    Your CSV uses full URLs like:
+    CSV has values like:
       HTTPS://1A4.COM/5LO1I9DSOCWXUZH9CCG0
-    We display only the final segment as the 'number':
+
+    We DISPLAY only:
       5LO1I9DSOCWXUZH9CCG0
     """
     if not unit_code:
         return ""
+
     s = str(unit_code).strip()
-    s = s.replace("\\", "/")
-    # remove trailing slash
-    if s.endswith("/"):
+
+    # Remove query strings/fragments if any
+    s = s.split("?", 1)[0].split("#", 1)[0]
+
+    # Normalize slashes
+    s = s.replace("\\", "/").strip()
+
+    # Remove trailing slashes
+    while s.endswith("/"):
         s = s[:-1]
-    # take last segment after /
-    last = s.split("/")[-1]
-    return last
+
+    # Last segment after slash
+    last = s.split("/")[-1].strip()
+    return last or s
 
 
 def data_url_to_pil_image(data_url: str) -> Image.Image:
-    """
-    Convert data:image/png;base64,... -> PIL Image
-    """
-    if not data_url:
-        raise ValueError("No template uploaded.")
-    if "base64," not in data_url:
-        raise ValueError("Invalid data URL.")
+    if not data_url or "base64," not in data_url:
+        raise ValueError("Template not available")
     b64 = data_url.split("base64,", 1)[1]
     raw = base64.b64decode(b64)
     return Image.open(io.BytesIO(raw)).convert("RGBA")
 
 
+def ensure_template_exists() -> bool:
+    return TEMPLATE_DATA_URL is not None and len(TEMPLATE_DATA_URL) > 30
+
+
+# -------------------------
+# Pages
+# -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -95,18 +93,16 @@ def home():
       <head>
         <style>
           body { font-family: Arial; background:#f4f6f8; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
-          .card { background:#fff; padding:28px; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,0.12); width:520px; }
-          a { display:inline-block; margin-top:10px; color:#111; text-decoration:none; }
+          .card { background:#fff; padding:28px; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,0.12); width:560px; }
           .muted { color:#666; }
+          a.btn { display:inline-block; margin-top:14px; padding:10px 14px; border-radius:10px; border:1px solid #ddd; background:#111; color:white; text-decoration:none; }
         </style>
       </head>
       <body>
         <div class="card">
           <h2 style="margin:0 0 10px 0;">🚀 Labelfast</h2>
-          <div class="muted">Cloud label designer + batch print.</div>
-          <div style="margin-top:14px;">
-            <a href="/designer">Open Designer</a>
-          </div>
+          <div class="muted">Designer + batch print + separate-PDF export.</div>
+          <a class="btn" href="/designer">Open Designer</a>
         </div>
       </body>
     </html>
@@ -122,6 +118,9 @@ def designer():
     x = LAYOUT["x"]
     y = LAYOUT["y"]
     count = len(METRC_CODES)
+
+    # show a sample display value even before upload
+    sample_display = display_text_from_unit_code(METRC_CODES[0]) if METRC_CODES else "5LO1I9DSOCWXUZH9CCG0"
 
     return """
     <html>
@@ -140,7 +139,8 @@ def designer():
           }}
           .btn.secondary {{ background:#fff; color:#111; }}
           .field {{ display:flex; gap:6px; align-items:center; }}
-          input[type="number"] {{ width:86px; padding:8px; border-radius:10px; border:1px solid #ddd; }}
+          input[type="number"] {{ width:90px; padding:8px; border-radius:10px; border:1px solid #ddd; }}
+          .help {{ color:#666; font-size:12px; }}
           .stage {{ padding:16px; }}
           .label {{
             width:{w}in; height:{h}in;
@@ -148,7 +148,7 @@ def designer():
             box-shadow:0 10px 30px rgba(0,0,0,0.12);
             border-radius:14px;
           }}
-          .bg {{ position:absolute; inset:0; background-size:cover; background-position:center; }}
+          .bg {{ position:absolute; inset:0; background-size:cover; background-position:center; background-repeat:no-repeat; }}
           .qr {{
             position:absolute;
             width:{qr_size}in; height:{qr_size}in;
@@ -158,10 +158,29 @@ def designer():
             display:flex; align-items:center; justify-content:center;
             font-weight:700;
           }}
-          .help {{ color:#666; font-size:12px; }}
-          @media print {{
-            body {{ background:white; margin:0; }}
-            .topbar, .stage {{ display:none !important; }}
+          .qrtext {{
+            position:absolute;
+            left:{x}in;
+            top:{ty}in;
+            width:{qr_size}in;
+            text-align:center;
+            font-size:9pt;
+            color:#111;
+            background: rgba(255,255,255,0.6);
+            border-radius:8px;
+            padding:2px 4px;
+          }}
+          .qrsub {{
+            position:absolute;
+            left:{x}in;
+            top:{ty2}in;
+            width:{qr_size}in;
+            text-align:center;
+            font-size:8pt;
+            color:#666;
+            background: rgba(255,255,255,0.45);
+            border-radius:8px;
+            padding:2px 4px;
           }}
         </style>
       </head>
@@ -205,10 +224,14 @@ def designer():
         <div class="stage">
           <div id="label" class="label">
             <div id="bg" class="bg"></div>
+
             <div id="qrbox" class="qr" style="left:{x}in; top:{y}in;">QR</div>
+            <div id="qrtext" class="qrtext">{sample_display}</div>
+            <div id="qrsub" class="qrsub">Metrc 1</div>
           </div>
+
           <div class="help" style="padding-top:10px;">
-            Drag the QR box where it should print. Position is saved automatically.
+            Drag the QR box to the correct spot. Position saves when you release the mouse.
           </div>
         </div>
 
@@ -232,6 +255,27 @@ def designer():
             }}).then(()=>window.location.reload());
           }}
 
+          function parseIn(v) {{
+            return parseFloat(String(v).replace('in','')) || 0;
+          }}
+
+          function syncTextPositions() {{
+            const qr = document.getElementById('qrbox');
+            const x = parseIn(qr.style.left);
+            const y = parseIn(qr.style.top);
+            const s = {qr_size};
+
+            const t = document.getElementById('qrtext');
+            const sub = document.getElementById('qrsub');
+            t.style.left = x + "in";
+            t.style.top  = (y + s + 0.06) + "in";
+            t.style.width = s + "in";
+
+            sub.style.left = x + "in";
+            sub.style.top  = (y + s + 0.18) + "in";
+            sub.style.width = s + "in";
+          }}
+
           function savePos(leftIn, topIn) {{
             fetch('/api/layout', {{
               method: 'POST',
@@ -240,15 +284,10 @@ def designer():
             }});
           }}
 
-          // Drag in inches
           const qr = document.getElementById('qrbox');
           const label = document.getElementById('label');
           let dragging = false;
           let startX=0, startY=0, startLeft=0, startTop=0;
-
-          function parseIn(v) {{
-            return parseFloat(String(v).replace('in','')) || 0;
-          }}
 
           qr.addEventListener('mousedown', (e)=>{{
             dragging = true;
@@ -272,6 +311,7 @@ def designer():
             const newTop  = Math.max(0, startTop  + dyIn);
             qr.style.left = newLeft.toFixed(3) + "in";
             qr.style.top  = newTop.toFixed(3)  + "in";
+            syncTextPositions();
           }});
 
           window.addEventListener('mouseup', ()=>{{
@@ -281,19 +321,26 @@ def designer():
           }});
 
           setBg();
+          syncTextPositions();
         </script>
       </body>
     </html>
     """.format(
-        w=w, h=h, qr_size=qr_size, x=x, y=y,
+        w=w, h=h, qr_size=qr_size,
+        x=x, y=y,
+        ty=(y + qr_size + 0.06),
+        ty2=(y + qr_size + 0.18),
         count=count,
-        bg_json=repr(bg)
+        sample_display=sample_display,
+        bg_json=repr(bg),
     )
 
 
+# -------------------------
+# API: save layout
+# -------------------------
 @app.post("/api/layout")
 async def set_layout(payload: dict):
-    # Update only provided keys
     for k in ["w", "h", "qr_size", "x", "y"]:
         if k in payload and payload[k] is not None:
             try:
@@ -303,13 +350,15 @@ async def set_layout(payload: dict):
     return {"ok": True, "layout": LAYOUT}
 
 
+# -------------------------
+# Uploads
+# -------------------------
 @app.post("/upload-template")
 async def upload_template(file: UploadFile = File(...)):
     global TEMPLATE_DATA_URL
     content = await file.read()
     name = (file.filename or "").lower()
 
-    # PDF -> png preview
     if name.endswith(".pdf"):
         pdf = fitz.open(stream=content, filetype="pdf")
         page = pdf.load_page(0)
@@ -317,7 +366,6 @@ async def upload_template(file: UploadFile = File(...)):
         img_bytes = pix.tobytes("png")
         TEMPLATE_DATA_URL = "data:image/png;base64," + base64.b64encode(img_bytes).decode()
     else:
-        # png/jpg -> store as png data url (works fine)
         mime = file.content_type or "image/png"
         TEMPLATE_DATA_URL = f"data:{mime};base64," + base64.b64encode(content).decode()
 
@@ -335,39 +383,47 @@ async def upload_metrc(file: UploadFile = File(...)):
     else:
         df = pd.read_excel(io.BytesIO(content))
 
-    # Your file uses: "Unit Code"
-    if "Unit Code" not in df.columns:
-        # fallback: try case-insensitive match
+    # expects "Unit Code" (your uploaded sample)
+    col = None
+    if "Unit Code" in df.columns:
+        col = "Unit Code"
+    else:
+        # case-insensitive fallback
         cols = {c.lower(): c for c in df.columns}
         if "unit code" in cols:
             col = cols["unit code"]
-        else:
-            METRC_CODES = []
-            return RedirectResponse("/designer", status_code=303)
-    else:
-        col = "Unit Code"
+
+    if not col:
+        METRC_CODES = []
+        return RedirectResponse("/designer", status_code=303)
 
     METRC_CODES = [str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()]
     return RedirectResponse("/designer", status_code=303)
 
 
+# -------------------------
+# Print All (direct print)
+# -------------------------
 @app.get("/print-all", response_class=HTMLResponse)
 def print_all():
-    """
-    Direct browser print (no download).
-    Prints one label per METRC row.
-    """
     w = LAYOUT["w"]
     h = LAYOUT["h"]
-    qr_size = LAYOUT["qr_size"]
+    s = LAYOUT["qr_size"]
     x = LAYOUT["x"]
     y = LAYOUT["y"]
-
     bg = TEMPLATE_DATA_URL or ""
-    labels_html = ""
 
+    if not METRC_CODES:
+        return """
+        <html><body style="font-family:Arial;padding:30px;">
+          <h3>No METRC tags loaded.</h3>
+          <a href="/designer">Back to Designer</a>
+        </body></html>
+        """
+
+    labels_html = ""
     for i, code in enumerate(METRC_CODES, start=1):
-        # QR encodes the full URL/code
+        # QR encodes full code (URL)
         qr_img = qrcode.make(code)
         buf = io.BytesIO()
         qr_img.save(buf, format="PNG")
@@ -378,17 +434,22 @@ def print_all():
         labels_html += """
         <div class="label">
           <div class="bg" style="background-image:url('{bg}')"></div>
+
           <img src="data:image/png;base64,{qr}" style="position:absolute; left:{x}in; top:{y}in; width:{s}in; height:{s}in;" />
+
           <div class="txt" style="position:absolute; left:{x}in; top:{ty}in; width:{s}in;">
             {display}
-            <div style="font-size:8pt; color:#666; margin-top:2px;">Metrc {n}</div>
+          </div>
+          <div class="sub" style="position:absolute; left:{x}in; top:{ty2}in; width:{s}in;">
+            Metrc {n}
           </div>
         </div>
         """.format(
             bg=bg,
             qr=qr_b64,
-            x=x, y=y, s=qr_size,
-            ty=(y + qr_size + 0.06),
+            x=x, y=y, s=s,
+            ty=(y + s + 0.06),
+            ty2=(y + s + 0.18),
             display=display,
             n=i
         )
@@ -401,7 +462,8 @@ def print_all():
           body {{ margin:0; }}
           .label {{ width:{w}in; height:{h}in; position:relative; overflow:hidden; }}
           .bg {{ position:absolute; inset:0; background-size:cover; background-position:center; background-repeat:no-repeat; }}
-          .txt {{ text-align:center; font-size:9pt; font-family:Arial; }}
+          .txt {{ text-align:center; font-size:9pt; font-family:Arial; color:#111; }}
+          .sub {{ text-align:center; font-size:8pt; font-family:Arial; color:#666; }}
         </style>
       </head>
       <body onload="window.print()">
@@ -411,76 +473,74 @@ def print_all():
     """.format(w=w, h=h, labels=labels_html)
 
 
+# -------------------------
+# Export ZIP (separate PDFs)
+# -------------------------
 @app.get("/export-zip")
 def export_zip():
-    """
-    Creates a ZIP with one PDF per METRC label.
-    This is for when you DO want separate PDFs (production + compliance archiving).
-    """
     if not METRC_CODES:
         return RedirectResponse("/designer", status_code=303)
-    if not TEMPLATE_DATA_URL:
+    if not ensure_template_exists():
         return RedirectResponse("/designer", status_code=303)
 
     w = LAYOUT["w"]
     h = LAYOUT["h"]
-    qr_size = LAYOUT["qr_size"]
+    s = LAYOUT["qr_size"]
     x = LAYOUT["x"]
     y = LAYOUT["y"]
 
-    # background as PIL image
     bg_img = data_url_to_pil_image(TEMPLATE_DATA_URL)
 
-    # Create ZIP in memory
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for i, code in enumerate(METRC_CODES, start=1):
             display = display_text_from_unit_code(code)
 
-            # QR image (PIL)
+            # QR encodes full code (URL)
             qr_img = qrcode.make(code).convert("RGB")
 
-            # Make PDF in memory
             pdf_buf = io.BytesIO()
             c = canvas.Canvas(pdf_buf, pagesize=(w * 72.0, h * 72.0))
 
-            # Draw background to full page
-            # reportlab uses points; images use pixels -> ImageReader handles it
+            # background full bleed
             bg_reader = ImageReader(bg_img)
             c.drawImage(bg_reader, 0, 0, width=w * 72.0, height=h * 72.0, mask="auto")
 
-            # Draw QR
-            qr_reader = ImageReader(qr_img)
-            c.drawImage(
-                qr_reader,
-                x * 72.0,
-                (h - y - qr_size) * 72.0,  # convert from top-based inches to reportlab bottom origin
-                width=qr_size * 72.0,
-                height=qr_size * 72.0
-            )
+            # QR placement:
+            # Designer uses TOP-based inches (y from top)
+            # ReportLab uses BOTTOM-based points
+            qr_x_pt = x * 72.0
+            qr_y_pt = (h - y - s) * 72.0  # convert top-origin to bottom-origin
 
-            # Draw text under QR (centered)
-            text_y_top_based = y + qr_size + 0.06
-            # convert top-based to bottom origin: y_from_bottom = (h - text_y - line_height)
+            qr_reader = ImageReader(qr_img)
+            c.drawImage(qr_reader, qr_x_pt, qr_y_pt, width=s * 72.0, height=s * 72.0)
+
+            # Text under QR (designer top-based)
+            # We place it slightly under QR, same as HTML
+            text_top = y + s + 0.06
+            sub_top = y + s + 0.18
+
+            # Convert to reportlab bottom-origin
+            # drawCentredString uses baseline; we subtract a bit for nicer placement
             c.setFont("Helvetica", 8)
             c.drawCentredString(
-                (x + qr_size / 2) * 72.0,
-                (h - text_y_top_based - 0.12) * 72.0,
+                (x + s / 2) * 72.0,
+                (h - text_top - 0.12) * 72.0,
                 display
             )
+
             c.setFont("Helvetica", 7)
             c.drawCentredString(
-                (x + qr_size / 2) * 72.0,
-                (h - text_y_top_based - 0.24) * 72.0,
+                (x + s / 2) * 72.0,
+                (h - sub_top - 0.12) * 72.0,
                 f"Metrc {i}"
             )
 
             c.showPage()
             c.save()
 
-            pdf_bytes = pdf_buf.getvalue()
             safe_name = display.replace("/", "_").replace("\\", "_")
-            z.writestr(f"{i:04d}_{safe_name}.pdf", pdf_bytes)
+            z.writestr(f"{i:04d}_{safe_name}.pdf", pdf_buf.getvalue())
 
     zip_buf.seek(0)
     return StreamingResponse(
