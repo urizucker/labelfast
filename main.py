@@ -43,34 +43,6 @@ LAYOUT = {
 # -------------------------
 # Helpers
 # -------------------------
-def display_text_from_unit_code(unit_code: str) -> str:
-    """
-    CSV has values like:
-      HTTPS://1A4.COM/5LO1I9DSOCWXUZH9CCG0
-
-    We DISPLAY only:
-      5LO1I9DSOCWXUZH9CCG0
-    """
-    if not unit_code:
-        return ""
-
-    s = str(unit_code).strip()
-
-    # Remove query strings/fragments if any
-    s = s.split("?", 1)[0].split("#", 1)[0]
-
-    # Normalize slashes
-    s = s.replace("\\", "/").strip()
-
-    # Remove trailing slashes
-    while s.endswith("/"):
-        s = s[:-1]
-
-    # Last segment after slash
-    last = s.split("/")[-1].strip()
-    return last or s
-
-
 def data_url_to_pil_image(data_url: str) -> Image.Image:
     if not data_url or "base64," not in data_url:
         raise ValueError("Template not available")
@@ -119,9 +91,6 @@ def designer():
     y = LAYOUT["y"]
     count = len(METRC_CODES)
 
-    # show a sample display value even before upload
-    sample_display = display_text_from_unit_code(METRC_CODES[0]) if METRC_CODES else "5LO1I9DSOCWXUZH9CCG0"
-
     return """
     <html>
       <head>
@@ -158,27 +127,15 @@ def designer():
             display:flex; align-items:center; justify-content:center;
             font-weight:700;
           }}
-          .qrtext {{
-            position:absolute;
-            left:{x}in;
-            top:{ty}in;
-            width:{qr_size}in;
-            text-align:center;
-            font-size:9pt;
-            color:#111;
-            background: rgba(255,255,255,0.6);
-            border-radius:8px;
-            padding:2px 4px;
-          }}
-          .qrsub {{
+          .metrc {{
             position:absolute;
             left:{x}in;
             top:{ty2}in;
             width:{qr_size}in;
             text-align:center;
-            font-size:8pt;
-            color:#666;
-            background: rgba(255,255,255,0.45);
+            font-size:9pt;
+            color:#111;
+            background: rgba(255,255,255,0.6);
             border-radius:8px;
             padding:2px 4px;
           }}
@@ -226,12 +183,11 @@ def designer():
             <div id="bg" class="bg"></div>
 
             <div id="qrbox" class="qr" style="left:{x}in; top:{y}in;">QR</div>
-            <div id="qrtext" class="qrtext">{sample_display}</div>
-            <div id="qrsub" class="qrsub">Metrc 1</div>
+            <div id="metrcLabel" class="metrc">Metrc 1</div>
           </div>
 
           <div class="help" style="padding-top:10px;">
-            Drag the QR box to the correct spot. Position saves when you release the mouse.
+            Drag the QR box. Position saves when you release the mouse.
           </div>
         </div>
 
@@ -259,21 +215,15 @@ def designer():
             return parseFloat(String(v).replace('in','')) || 0;
           }}
 
-          function syncTextPositions() {{
+          function syncMetrcLabel() {{
             const qr = document.getElementById('qrbox');
             const x = parseIn(qr.style.left);
             const y = parseIn(qr.style.top);
             const s = {qr_size};
-
-            const t = document.getElementById('qrtext');
-            const sub = document.getElementById('qrsub');
-            t.style.left = x + "in";
-            t.style.top  = (y + s + 0.06) + "in";
-            t.style.width = s + "in";
-
-            sub.style.left = x + "in";
-            sub.style.top  = (y + s + 0.18) + "in";
-            sub.style.width = s + "in";
+            const m = document.getElementById('metrcLabel');
+            m.style.left = x + "in";
+            m.style.top  = (y + s + 0.12) + "in";
+            m.style.width = s + "in";
           }}
 
           function savePos(leftIn, topIn) {{
@@ -311,7 +261,7 @@ def designer():
             const newTop  = Math.max(0, startTop  + dyIn);
             qr.style.left = newLeft.toFixed(3) + "in";
             qr.style.top  = newTop.toFixed(3)  + "in";
-            syncTextPositions();
+            syncMetrcLabel();
           }});
 
           window.addEventListener('mouseup', ()=>{{
@@ -321,17 +271,15 @@ def designer():
           }});
 
           setBg();
-          syncTextPositions();
+          syncMetrcLabel();
         </script>
       </body>
     </html>
     """.format(
         w=w, h=h, qr_size=qr_size,
         x=x, y=y,
-        ty=(y + qr_size + 0.06),
-        ty2=(y + qr_size + 0.18),
+        ty2=(y + qr_size + 0.12),
         count=count,
-        sample_display=sample_display,
         bg_json=repr(bg),
     )
 
@@ -383,12 +331,11 @@ async def upload_metrc(file: UploadFile = File(...)):
     else:
         df = pd.read_excel(io.BytesIO(content))
 
-    # expects "Unit Code" (your uploaded sample)
+    # expects "Unit Code"
     col = None
     if "Unit Code" in df.columns:
         col = "Unit Code"
     else:
-        # case-insensitive fallback
         cols = {c.lower(): c for c in df.columns}
         if "unit code" in cols:
             col = cols["unit code"]
@@ -423,24 +370,16 @@ def print_all():
 
     labels_html = ""
     for i, code in enumerate(METRC_CODES, start=1):
-        # QR encodes full code (URL)
         qr_img = qrcode.make(code)
         buf = io.BytesIO()
         qr_img.save(buf, format="PNG")
         qr_b64 = base64.b64encode(buf.getvalue()).decode()
 
-        display = display_text_from_unit_code(code)
-
         labels_html += """
         <div class="label">
           <div class="bg" style="background-image:url('{bg}')"></div>
-
           <img src="data:image/png;base64,{qr}" style="position:absolute; left:{x}in; top:{y}in; width:{s}in; height:{s}in;" />
-
-          <div class="txt" style="position:absolute; left:{x}in; top:{ty}in; width:{s}in;">
-            {display}
-          </div>
-          <div class="sub" style="position:absolute; left:{x}in; top:{ty2}in; width:{s}in;">
+          <div class="sub" style="position:absolute; left:{x}in; top:{ty}in; width:{s}in;">
             Metrc {n}
           </div>
         </div>
@@ -448,9 +387,7 @@ def print_all():
             bg=bg,
             qr=qr_b64,
             x=x, y=y, s=s,
-            ty=(y + s + 0.06),
-            ty2=(y + s + 0.18),
-            display=display,
+            ty=(y + s + 0.12),
             n=i
         )
 
@@ -462,8 +399,7 @@ def print_all():
           body {{ margin:0; }}
           .label {{ width:{w}in; height:{h}in; position:relative; overflow:hidden; }}
           .bg {{ position:absolute; inset:0; background-size:cover; background-position:center; background-repeat:no-repeat; }}
-          .txt {{ text-align:center; font-size:9pt; font-family:Arial; color:#111; }}
-          .sub {{ text-align:center; font-size:8pt; font-family:Arial; color:#666; }}
+          .sub {{ text-align:center; font-size:9pt; font-family:Arial; color:#111; background: rgba(255,255,255,0.0); }}
         </style>
       </head>
       <body onload="window.print()">
@@ -494,42 +430,23 @@ def export_zip():
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for i, code in enumerate(METRC_CODES, start=1):
-            display = display_text_from_unit_code(code)
-
-            # QR encodes full code (URL)
             qr_img = qrcode.make(code).convert("RGB")
 
             pdf_buf = io.BytesIO()
             c = canvas.Canvas(pdf_buf, pagesize=(w * 72.0, h * 72.0))
 
-            # background full bleed
             bg_reader = ImageReader(bg_img)
             c.drawImage(bg_reader, 0, 0, width=w * 72.0, height=h * 72.0, mask="auto")
 
-            # QR placement:
-            # Designer uses TOP-based inches (y from top)
-            # ReportLab uses BOTTOM-based points
             qr_x_pt = x * 72.0
-            qr_y_pt = (h - y - s) * 72.0  # convert top-origin to bottom-origin
+            qr_y_pt = (h - y - s) * 72.0
 
             qr_reader = ImageReader(qr_img)
             c.drawImage(qr_reader, qr_x_pt, qr_y_pt, width=s * 72.0, height=s * 72.0)
 
-            # Text under QR (designer top-based)
-            # We place it slightly under QR, same as HTML
-            text_top = y + s + 0.06
-            sub_top = y + s + 0.18
-
-            # Convert to reportlab bottom-origin
-            # drawCentredString uses baseline; we subtract a bit for nicer placement
-            c.setFont("Helvetica", 8)
-            c.drawCentredString(
-                (x + s / 2) * 72.0,
-                (h - text_top - 0.12) * 72.0,
-                display
-            )
-
+            # Only "Metrc X"
             c.setFont("Helvetica", 7)
+            sub_top = y + s + 0.12
             c.drawCentredString(
                 (x + s / 2) * 72.0,
                 (h - sub_top - 0.12) * 72.0,
@@ -539,8 +456,7 @@ def export_zip():
             c.showPage()
             c.save()
 
-            safe_name = display.replace("/", "_").replace("\\", "_")
-            z.writestr(f"{i:04d}_{safe_name}.pdf", pdf_buf.getvalue())
+            z.writestr(f"{i:04d}_metrc_{i}.pdf", pdf_buf.getvalue())
 
     zip_buf.seek(0)
     return StreamingResponse(
