@@ -37,8 +37,26 @@ LAYOUT = {
     "x": 0.2,   # left in inches
     "y": 0.2,   # top in inches
 }
-
 def display_text_from_unit_code(unit_code: str) -> str:
+    if not unit_code:
+        return ""
+    s = str(unit_code).strip()
+
+    # remove query string/fragments if any
+    s = s.split("?", 1)[0].split("#", 1)[0]
+
+    # normalize slashes
+    s = s.replace("\\", "/").strip()
+
+    # remove trailing slash
+    while s.endswith("/"):
+        s = s[:-1]
+
+    # take last path segment
+    last = s.split("/")[-1].strip()
+
+    # if the whole thing had no slashes (already a code), keep it
+    return last or s
     """
     Your CSV uses full URLs like:
       HTTPS://1A4.COM/5LO1I9DSOCWXUZH9CCG0
